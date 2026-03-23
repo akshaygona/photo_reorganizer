@@ -1,39 +1,122 @@
 #!/usr/bin/env python3
 
 import argparse
+import concurrent.futures
 import hashlib
+import json
 import os
 import shutil
 import subprocess
-import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
 MEDIA_EXTS = {
-    ".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".gif",
-    ".bmp", ".webp", ".mov", ".mp4", ".m4v", ".avi", ".mts", ".3gp", ".mpg", ".mpeg"
+    ".jpg", ".jpeg", ".png", ".heic", ".heif",
+    ".tif", ".tiff", ".gif", ".bmp", ".webp",
+    ".mov", ".mp4", ".m4v", ".avi", ".mts", ".3gp", ".mpg", ".mpeg"
 }
 
 SKIP_DIR_NAMES = {
-    "resources", "database", "private", "previews", "thumbnails", "proxies", "renders"
+    "resources", "database", "private", "previews",
+    "thumbnails", "proxies", "renders"
 }
+
+EXIF_DATE_FIELDS = [
+    "SubSecDateTimeOriginal",
+    "DateTimeOriginal",
+    "CreationDate",
+    "CreateDate",
+    "MediaCreateDate",
+    "TrackCreateDate",
+    "FileCreateDate",
+    "FileModifyDate",
+]
 
 def run_cmd(cmd):
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return result.stdout.strip()
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False
+        ).stdout.strip()
     except Exception:
         return ""
+
+def parse_date_string(value: str):
+    if not value:
+        return None
+
+    value = value.strip()
+
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+
+    candidates = [
+        value,
+        value.replace(" +0000", "+00:00"),
+        value.replace(" -0000", "+00:00"),
+    ]
+
+    for candidate in candidates:
+        try:
+            return datetime.fromisoformat(candidate)
+        except Exception:
+            pass
+
+    formats = [
+        "%Y:%m:%d %H:%M:%S.%f%z",
+        "%Y:%m:%d %H:%M:%S%z",
+        "%Y:%m:%d %H:%M:%S.%f",
+        "%Y:%m:%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f%z",
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt)
+        except Exception:
+            pass
+
+    return None
+
+def exiftool_date(path: Path):
+    try:
+        result = subprocess.run(
+            ["exiftool", "-j", str(path)],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+
+        data = json.loads(result.stdout)
+        if not data:
+            return None
+
+        meta = data[0]
+        for field in EXIF_DATE_FIELDS:
+            if field in meta and meta[field]:
+                dt = parse_date_string(str(meta[field]))
+                if dt:
+                    return dt
+    except Exception:
+        pass
+
+    return None
 
 def mdls_date(path: Path):
     for attr in ["kMDItemContentCreationDate", "kMDItemFSCreationDate"]:
         out = run_cmd(["mdls", "-raw", "-name", attr, str(path)])
         if out and out != "(null)":
-            try:
-                cleaned = out.replace(" +0000", "").strip()
-                return datetime.fromisoformat(cleaned)
-            except Exception:
-                pass
+            dt = parse_date_string(out)
+            if dt:
+                return dt
     return None
 
 def stat_date(path: Path):
@@ -42,13 +125,20 @@ def stat_date(path: Path):
     except Exception:
         return None
 
-def get_best_date(path: Path):
-    return mdls_date(path) or stat_date(path)
+def get_date(path: Path):
+    dt = exiftool_date(path) or mdls_date(path) or stat_date(path)
+    if dt and dt.year < 1990:
+        return None
+    return dt
 
-def is_media_file(path: Path):
-    return path.is_file() and path.suffix.lower() in MEDIA_EXTS
+def is_media(path: Path):
+    return (
+        path.is_file()
+        and not path.name.startswith("._")
+        and path.suffix.lower() in MEDIA_EXTS
+    )
 
-def sha256_file(path: Path, chunk_size=1024 * 1024):
+def file_hash(path: Path, chunk_size=1024 * 1024):
     h = hashlib.sha256()
     with path.open("rb") as f:
         while True:
@@ -58,129 +148,141 @@ def sha256_file(path: Path, chunk_size=1024 * 1024):
             h.update(chunk)
     return h.hexdigest()
 
-def unique_dest(dest: Path):
-    if not dest.exists():
+def unique_path(dest: Path, reserved=None):
+    reserved = reserved or set()
+    if not dest.exists() and dest not in reserved:
         return dest
-    stem = dest.stem
-    suffix = dest.suffix
-    parent = dest.parent
     i = 1
     while True:
-        candidate = parent / f"{stem}__{i}{suffix}"
-        if not candidate.exists():
+        candidate = dest.with_name(f"{dest.stem}__{i}{dest.suffix}")
+        if not candidate.exists() and candidate not in reserved:
             return candidate
         i += 1
 
-def copy_file(src: Path, dest: Path, mode: str):
+def copy_file(src: Path, dest: Path):
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if mode == "copy":
-        shutil.copy2(src, dest)
-    elif mode == "hardlink":
-        try:
-            os.link(src, dest)
-        except OSError:
-            shutil.copy2(src, dest)
-    elif mode == "symlink":
-        os.symlink(src, dest)
-    else:
-        raise ValueError(f"Unsupported mode: {mode}")
+    shutil.copy2(src, dest)
 
-def find_photoslibrary_roots(lib_path: Path):
-    candidates = []
-    originals = lib_path / "originals"
-    masters = lib_path / "Masters"
-
+def photos_roots(lib: Path):
+    originals = lib / "originals"
+    masters = lib / "Masters"
+    roots = []
     if originals.exists():
-        candidates.append(originals)
+        roots.append(originals)
     if masters.exists():
-        candidates.append(masters)
+        roots.append(masters)
+    return roots or [lib]
 
-    if candidates:
-        return candidates
-    return [lib_path]
-
-def walk_media_files(source: Path):
-    if source.suffix.lower() == ".photoslibrary":
-        roots = find_photoslibrary_roots(source)
-    else:
-        roots = [source]
+def walk_source(source: Path):
+    roots = photos_roots(source) if source.suffix.lower() == ".photoslibrary" else [source]
 
     for root in roots:
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIR_NAMES]
-            for name in filenames:
-                path = Path(dirpath) / name
-                if is_media_file(path):
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                if is_media(path):
                     yield path
+
+def process_file(src_file: Path, output_root: Path, dry_run: bool, seen_hashes, reserved_destinations, lock):
+    try:
+        h = file_hash(src_file)
+        with lock:
+            if h in seen_hashes:
+                return "duplicates", f"[DUPLICATE] {src_file}"
+            seen_hashes.add(h)
+
+        dt = get_date(src_file)
+        if not dt:
+            return "no_date", f"[NO DATE] {src_file}"
+
+        year_folder = dt.strftime("%Y")
+        month_folder = dt.strftime("%Y-%m")
+        dest_dir = output_root / year_folder / month_folder
+
+        with lock:
+            dest_file = unique_path(dest_dir / src_file.name, reserved_destinations)
+            reserved_destinations.add(dest_file)
+
+        if dry_run:
+            return "copied", f"[DRY RUN] {src_file} -> {dest_file}"
+
+        copy_file(src_file, dest_file)
+        return "copied", f"[COPIED] {src_file} -> {dest_file}"
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        return "errors", f"[ERROR] {src_file}: {e}"
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sources", nargs="+", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--mode", choices=["copy", "hardlink", "symlink"], default="copy")
-    parser.add_argument("--dedupe", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
+
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
 
     output_root = Path(args.output).expanduser().resolve()
     seen_hashes = set()
-    processed = 0
-    copied = 0
-    skipped_dupe = 0
-    skipped_no_date = 0
-    errors = 0
+    reserved_destinations = set()
+    lock = threading.Lock()
 
-    for source_str in args.sources:
-        source = Path(source_str).expanduser().resolve()
+    stats = {
+        "processed": 0,
+        "copied": 0,
+        "duplicates": 0,
+        "no_date": 0,
+        "errors": 0,
+    }
 
-        if not source.exists():
-            print(f"[MISSING] {source}", file=sys.stderr)
-            continue
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+        pending = set()
+        pending_limit = max(1, args.workers * 4)
 
-        print(f"[SCAN] {source}")
+        for source_str in args.sources:
+            source = Path(source_str).expanduser().resolve()
 
-        for src_file in walk_media_files(source):
-            processed += 1
+            if not source.exists():
+                print(f"[MISSING] {source}")
+                continue
 
-            try:
-                dt = get_best_date(src_file)
-                if not dt:
-                    skipped_no_date += 1
-                    print(f"[NO DATE] {src_file}")
-                    continue
+            print(f"[SCAN] {source}")
 
-                if args.dedupe:
-                    file_hash = sha256_file(src_file)
-                    if file_hash in seen_hashes:
-                        skipped_dupe += 1
-                        print(f"[DUPLICATE] {src_file}")
-                        continue
-                    seen_hashes.add(file_hash)
+            for src_file in walk_source(source):
+                stats["processed"] += 1
+                pending.add(
+                    executor.submit(
+                        process_file,
+                        src_file,
+                        output_root,
+                        args.dry_run,
+                        seen_hashes,
+                        reserved_destinations,
+                        lock,
+                    )
+                )
 
-                year_folder = dt.strftime("%Y")
-                month_folder = dt.strftime("%Y-%m")
-                dest_dir = output_root / year_folder / month_folder
-                dest_file = unique_dest(dest_dir / src_file.name)
+                if len(pending) >= pending_limit:
+                    done, pending = concurrent.futures.wait(
+                        pending,
+                        return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    for future in done:
+                        outcome, message = future.result()
+                        stats[outcome] += 1
+                        print(message)
 
-                if args.dry_run:
-                    print(f"[DRY RUN] {src_file} -> {dest_file}")
-                else:
-                    copy_file(src_file, dest_file, args.mode)
-                    print(f"[COPIED] {src_file} -> {dest_file}")
+        for future in concurrent.futures.as_completed(pending):
+            outcome, message = future.result()
+            stats[outcome] += 1
+            print(message)
 
-                copied += 1
-
-            except Exception as e:
-                errors += 1
-                print(f"[ERROR] {src_file}: {e}", file=sys.stderr)
-
-    print()
-    print("Done")
-    print(f"Processed: {processed}")
-    print(f"Copied: {copied}")
-    print(f"Skipped duplicates: {skipped_dupe}")
-    print(f"Skipped no date: {skipped_no_date}")
-    print(f"Errors: {errors}")
+    print("\nDONE")
+    for k, v in stats.items():
+        print(f"{k}: {v}")
 
 if __name__ == "__main__":
     main()
