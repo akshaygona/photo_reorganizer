@@ -1,86 +1,121 @@
-# Photo Reorganizer
+<div align="center">
 
-This folder contains two Python scripts you can run to organize photo/video files by capture date and verify the results.
+# 📦 Shoebox
 
-Replace the placeholders in the example commands (`/path/to/...`) with your own paths.
+**Turn a shoebox of 30,000 unsorted photos into a clean, deduplicated, chronological archive — in one command.**
 
-- `group_photos_by_month.py`: scans one or more photo sources, extracts each media file's date (EXIF/metadata/stat), computes a SHA-256 hash for deduplication, and copies unique media into `YYYY/YYYY-MM` folders under an output directory.
-- `verify_copy.py`: verifies that the destination contains the same media content as the source(s) by comparing SHA-256 hashes, and writes a JSON report.
+[![CI](https://github.com/akshaygona/photo_reorganizer/actions/workflows/ci.yml/badge.svg)](https://github.com/akshaygona/photo_reorganizer/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## Requirements
+</div>
 
-- `exiftool` must be installed and available on your `PATH` (used to read capture timestamps).
-- `mdls` (macOS) is used as an optional fallback for date extraction; on non-macOS systems it will be skipped.
-- Python 3.
+---
 
-## `group_photos_by_month.py`
+Everyone has the digital shoebox: a decade of camera dumps, WhatsApp exports, old phone backups, and `New Folder (3)` directories — full of duplicates, scattered across drives. Shoebox reads the *real* capture date out of every photo and video, skips exact duplicates by content hash, and files everything into a tidy archive:
 
-### Purpose
-
-- Walks each input source recursively (with some directories skipped).
-- For each media file:
-  - computes SHA-256 hash (dedupe)
-  - extracts a date (EXIF via `exiftool`, else `mdls`, else file modified time)
-  - copies the file to: `OUTPUT_ROOT/YYYY/YYYY-MM/`
-  - avoids filename collisions by reserving destination paths in-memory while running in parallel
-
-### Common command examples
-
-#### Dry run (no copying)
-
-```bash
-python3 group_photos_by_month.py \
-  --sources \
-  "/path/to/source1" \
-  "/path/to/source2" \
-  "/path/to/source3" \
-  --output "/path/to/output_root" \
-  --dry-run
+```
+Archive/
+├── 2017/
+│   ├── 2017-08/
+│   │   ├── IMG_2041.jpg
+│   │   └── beach_trip.mov
+│   └── 2017-09/
+├── 2018/
+…
 ```
 
-#### Real run (copy files)
+## ✨ Highlights
+
+- 🖥️ **Full interactive UI in your terminal** — just run `shoebox` and follow the screens. Live progress bars, streaming log, final summary.
+- 🔍 **Real capture dates** — EXIF for photos, QuickTime/MP4 metadata for videos, with a clear fallback chain (`exiftool` → built-in parsers → filesystem). Works on JPEG, HEIC/HEIF, PNG, TIFF, WebP, MP4, MOV, M4V, 3GP and more.
+- 🧬 **Content-hash deduplication** — the same photo saved five times is archived once. SHA-256, not filenames.
+- 🍎 **Apple Photos aware** — point it directly at a `.photoslibrary` bundle; it pulls originals and skips thumbnails/derivatives.
+- 🔁 **Idempotent** — re-run it any time; already-archived files are detected by content and skipped, never duplicated.
+- 🛡️ **Crash-safe & non-destructive** — copies by default, writes via temp-file + atomic rename, never overwrites. `--dry-run` previews everything.
+- ⚡ **Fast** — parallel hashing/copying and batched metadata reads (hundreds of files per `exiftool` call).
+- ✅ **Verifiable** — `shoebox verify` re-hashes both sides and proves your archive contains every source byte before you delete anything.
+- 📦 **Zero required external tools** — built-in pure-Python metadata parsers; installing [`exiftool`](https://exiftool.org/) is optional and extends format coverage (RAW formats, AVI, etc.).
+
+## 🚀 Install
 
 ```bash
-python3 group_photos_by_month.py \
-  --sources \
-  "/path/to/source1" \
-  "/path/to/source2" \
-  "/path/to/source3" \
-  --output "/path/to/output_root"
+pipx install git+https://github.com/akshaygona/photo_reorganizer
+# or: pip install git+https://github.com/akshaygona/photo_reorganizer
 ```
 
-#### Control parallelism
-
-By default it uses `--workers 8`. If you want to tune performance:
+Optional, for maximum format coverage:
 
 ```bash
-python3 group_photos_by_month.py ... --workers 12
+brew install exiftool        # macOS
+sudo apt install libimage-exiftool-perl   # Debian/Ubuntu
 ```
 
-## `verify_copy.py`
+## 🕹️ Use it
 
-### Purpose
-
-- Scans the same set of `--sources` plus the `--dest` directory.
-- Computes SHA-256 for each media file and groups paths by hash.
-- Produces a JSON report (missing/extra hashes) and prints a summary.
-
-### Common command examples
-
-#### Verify after a copy run
+### The easy way — interactive UI
 
 ```bash
-python3 verify_copy.py \
-  --sources \
-  "/path/to/source1" \
-  "/path/to/source2" \
-  "/path/to/source3" \
-  --dest "/path/to/output_root" \
-  --report "verify_report.json"
+shoebox
 ```
 
-After completion, check:
+Pick your folders, flip the options you want, hit **Start**, watch it go.
 
-- `verified_complete` in the printed summary (and the same field in the JSON report).
-- `missing_unique_hashes_in_dest` and `extra_unique_hashes_in_dest`.
+### The scriptable way — CLI
 
+```bash
+# Preview first (always a good idea)
+shoebox organize ~/Desktop/dump ~/Pictures/Photos\ Library.photoslibrary \
+  -o ~/Pictures/Archive --dry-run
+
+# Do it for real
+shoebox organize ~/Desktop/dump ~/Pictures/Photos\ Library.photoslibrary \
+  -o ~/Pictures/Archive
+
+# Prove the archive is complete before deleting the originals
+shoebox verify ~/Desktop/dump -o ~/Pictures/Archive
+```
+
+### Options worth knowing
+
+| Flag | What it does |
+|---|---|
+| `--dry-run` | Plan the whole run, write nothing |
+| `--move` | Move instead of copy |
+| `--hardlink` | Instant, zero extra disk space (same filesystem only) |
+| `--keep-undated` | File undated media under `Unsorted/` instead of skipping |
+| `--verify-writes` | Re-hash every file after copying (paranoid mode) |
+| `--report out.json` | Full machine-readable report of every decision |
+| `-w 16` | Parallel workers (default 8) |
+
+## 🧠 How it decides the date
+
+For every file, the first hit wins:
+
+1. **`exiftool`** (if installed) — `DateTimeOriginal`, `CreateDate`, `MediaCreateDate`, … queried in batches of 200 files per process.
+2. **Built-in parsers** — pure-Python readers for EXIF in JPEG/TIFF/PNG/WebP, the `Exif` item in HEIC/HEIF, and the `mvhd` creation time in MP4/MOV.
+3. **Spotlight** (macOS) — content creation date.
+4. **File modified time** — last resort.
+
+Timestamps before 1990 are treated as uninitialized garbage (hello, 1904-01-01 camera epochs) and rejected.
+
+## 🔬 Safety model
+
+- **Copy is the default.** Your originals are never touched unless you pass `--move`.
+- Every write goes to a temporary file and is atomically renamed into place — an interrupted run can't leave a truncated photo at a final filename.
+- Name collisions get `__1`, `__2`, … suffixes; existing files are never overwritten.
+- `shoebox verify` gives you a cryptographic, file-by-file proof of completeness before you delete anything.
+
+## 🛠️ Development
+
+```bash
+git clone https://github.com/akshaygona/photo_reorganizer && cd photo_reorganizer
+python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+.venv/bin/pytest
+```
+
+The test suite builds real binary fixtures (JPEG APP1/EXIF, PNG `eXIf` chunks, ISO-BMFF HEIC with `iinf`/`iloc`, MP4 `mvhd`) and runs the full engine, CLI, and a headless TUI session against them.
+
+## 📄 License
+
+[MIT](LICENSE)
