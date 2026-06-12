@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shoebox-organizer"
+version = "1.0.0"
+description = "Turn a shoebox of unsorted photos into a clean, deduplicated, chronological archive."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Akshay Gona" }]
+keywords = ["photos", "organizer", "exif", "dedupe", "media", "tui"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: System :: Archiving",
+]
+dependencies = [
+    "rich>=13.0",
+    "textual>=0.80",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov"]
+
+[project.scripts]
+shoebox = "shoebox.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/akshaygona/photo_reorganizer"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shoebox"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
